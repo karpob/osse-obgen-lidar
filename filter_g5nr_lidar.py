@@ -5,6 +5,9 @@ import argparse,os,glob
 from matplotlib import pyplot as plt
 import random
 from IPython import embed 
+from multiprocessing import Pool
+from functools import partial
+
 random.seed(123) # make reproducible random number
 #units from https://www.nwpsaf.eu/site/download/documentation/rtm/docs_rttov12/rttov_gas_cloud_aerosol_units.pdf
 Mair = 28.9648
@@ -13,7 +16,7 @@ epsilon = Mair/Mh2o
 Mdry = 28.9644
 R = 8.3144598 
 Rd = R/Mdry
-def main(inArg,outArg):
+def main(inArg,outArg,nThreads):
     nt,nl,CF,QI,QL,QR,QS,QV,P,bscat,u,v,T,lat,lon,t,H = readNc(inArg)
     print("Reading done.")
     idx_ret = np.zeros((nt,nl),dtype=float)
@@ -23,10 +26,13 @@ def main(inArg,outArg):
     
     QII = mass2VolumeDensity(QI,P,T, QV)
     QLL = mass2VolumeDensity(QL,P,T,QV)
-    for i in range(nt):
-        if(i%1000==0):
-            print('index {} of {}'.format(i,nt))
-        idx_ret[i,:] = filterLidarReturns(CF[:,:],QII[i,:],QLL[i,:],QR[i,:],QS[i,:],QV[i,:], P[i,:], T[i,:],H[i,:],bscat[:,:],bmin,bmax,i)
+    print("Initialize Pool with {} Workers".format(nThreads))
+    p = Pool(nThreads)
+    # pass ichans in as non-iterable via partial.
+    print("Initialized Pool.")
+    ivals = list(range(nt))
+    idx_ret = p.map(partial(filterLidarReturns, CF=CF, QI=QII, QL=QLL, QR=QR, QS=QS, bbscat=bscat, bmin=bmin, bmax=bmax),ivals)
+    idx_ret = np.asarray(idx_ret)
     print(idx_ret.min(),idx_ret.max())
     idxOut = np.where(idx_ret>0)
     lat2 = np.zeros([nt,nl])
@@ -163,7 +169,7 @@ def cloudFracPdf(cloud_fraction):
     return pCloud
 
 
-def filterLidarReturns(CF, QI, QL, QR, QS, QV, P, T,H, bbscat, bmin, bmax, ix):
+def filterLidarReturns(ix, CF, QI, QL, QR, QS, bbscat, bmin, bmax):
     
     colIdx = np.zeros(CF.shape[1],dtype=int)
     
@@ -171,16 +177,18 @@ def filterLidarReturns(CF, QI, QL, QR, QS, QV, P, T,H, bbscat, bmin, bmax, ix):
     izMax = CF.shape[1]
     for k,cloud_fraction in enumerate(CF[ix,:]):
         pCloud = cloudFracPdf(cloud_fraction)
-        qivol = QI[k]
-        qlvol = QL[k]
+        qivol = QI[ix,k]
+        qlvol = QL[ix,k]
+        qs = QS[ix,k]
+        qr = QR[ix,k]
         bscat = bbscat[ix,:]
        
 
         #if clear and sufficient aerosol set to True
-        if( (cloud_fraction <= 0.05) and (bscat[k]>bmin) and (bscat[k]<bmax) and np.isclose(qivol,0) and np.isclose(qlvol,0) and np.isclose(QR[k],0) and np.isclose(QS[k],0) ):
+        if( (cloud_fraction <= 0.05) and (bscat[k]>bmin) and (bscat[k]<bmax) and np.isclose(qivol,0) and np.isclose(qlvol,0) and np.isclose(qr,0) and np.isclose(qs,0) ):
             colIdx[k] = 1
         #if we have a thin cirrus treat it like an aerosol in clear conditions
-        elif( cloud_fraction>0.05 and qivol <= 0.05 and qivol>0.001 and np.isclose(QL[k],0) and np.isclose(QR[k],0) and random.random()< pCloud):
+        elif( cloud_fraction>0.05 and qivol <= 0.05 and qivol>0.001 and np.isclose(qlvol,0) and np.isclose(qr,0) and random.random()< pCloud):
             colIdx[k] = 2
             
         #if we have significant cloud frac and enough stuff for thick cloud
@@ -237,7 +245,8 @@ if __name__ == '__main__' :
     parser = argparse.ArgumentParser( description = 'read gz text file,select +/-30 deg scan angle, and output to another file using --in directory and --out directory')
     parser.add_argument('--in', help = 'path to ncdiag', required = True, dest = 'path')
     parser.add_argument('--out', help = 'path to ncdiag', required = True, dest = 'outpath')
+    parser.add_argument('--nthreads', help = 'number of threads to run with.', type=int, default='2', required = False, dest = 'nthreads')
     arg = parser.parse_args()
     print("Reading {}".format(arg.path))
-    main(arg.path,arg.outpath)
+    main(arg.path,arg.outpath,arg.nthreads)
 
